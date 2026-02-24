@@ -1,0 +1,65 @@
+class PIDController:
+    def __init__(self, kp, ki, kd):
+        self.kp, self.ki, self.kd = kp, ki, kd
+        self.prev_error  = 0.0   # 上一次误差（用于求D）
+        self.integral    = 0.0   # 误差积分（用于求I）
+
+    def compute(self, target, current, dt):
+        error = target - current          # e(t) = 目标 - 当前
+
+        self.integral    += error * dt    # ∫e dt（累加）
+        derivative = (error - self.prev_error) / dt  # de/dt
+        self.prev_error   = error
+
+        output = (self.kp * error          # P 项
+                + self.ki * self.integral  # I 项
+                + self.kd * derivative)    # D 项
+        return output
+
+
+class DepthController(Node):
+    def __init__(self):
+        super().__init__('depth_controller')
+
+        # ── 当前状态（来自 StateEstimator）──
+        self.current_depth = 0.0
+        self.target_depth  = 0.0
+        self.last_time     = self.get_clock().now()
+
+        self.pid = PIDController(kp=2.0, ki=0.1, kd=0.5)
+
+        # ── 订阅当前状态 topic（由 StateEstimator 发布）──
+        self.create_subscription(Float64, '/uuv_state',
+                                  self.state_callback, 10)
+
+        # ── 订阅目标状态 topic（由 Guidance Node 发布）──
+        self.create_subscription(Float64, '/target_depth',
+                                  self.target_callback, 10)
+
+        self.thruster_pub = self.create_publisher(
+            Float64, '/thruster_cmd', 10)
+
+        self.create_timer(0.1, self.control_loop)  # 10 Hz
+
+    # callback 只存数据
+    def state_callback(self, msg):
+        self.current_depth = msg.data    # 「你现在在哪」
+
+    def target_callback(self, msg):
+        self.target_depth = msg.data     # 「你要去哪」
+
+    # timer 统一控制
+    def control_loop(self):
+        now = self.get_clock().now()
+        dt  = (now - self.last_time).nanoseconds() * 1e-9
+        self.last_time = now
+
+        thrust = self.pid.compute(
+            self.target_depth,   # 目标（来自 Guidance）
+            self.current_depth,  # 当前（来自 StateEstimator）
+            dt
+        )
+
+        msg = Float64()
+        msg.data = float(max(-100.0, min(100.0, thrust)))  # 限幅
+        self.thruster_pub.publish(msg)
